@@ -27,14 +27,42 @@ let currentUrl = "";
 let editingType = null;
 let editingId = null;
 let filters = { styles: "", scripts: "" };
+let currentTheme = "dark";
+let currentView = "card";
 
 const $ = id => document.getElementById(id);
+
+const ICON_CARD = '<path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/>';
+const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 6h18v4H3v-4z"/>';
 
 (async () => {
   const [tab] = await p(chrome.tabs, "query", { active: true, currentWindow: true });
   currentTabId = tab?.id;
   currentUrl = tab?.url || "";
   $("siteLabel").textContent = "当前站点：" + (currentUrl ? new URL(currentUrl).hostname : "—");
+
+  // 恢复主题与展示模式
+  const prefs = await p(chrome.storage.local, "get", ["theme", "view"]);
+  currentTheme = prefs.theme || "dark";
+  currentView = prefs.view || "card";
+  applyTheme(currentTheme);
+  applyView(currentView);
+
+  $("themeBtn").addEventListener("click", async () => {
+    currentTheme = currentTheme === "dark" ? "light" : "dark";
+    applyTheme(currentTheme);
+    await p(chrome.storage.local, "set", { theme: currentTheme });
+  });
+  $("viewBtn").addEventListener("click", async () => {
+    currentView = currentView === "card" ? "list" : "card";
+    applyView(currentView);
+    await p(chrome.storage.local, "set", { view: currentView });
+  });
+
+  // 导入导出
+  $("exportBtn").addEventListener("click", exportRules);
+  $("importBtn").addEventListener("click", () => $("importFile").click());
+  $("importFile").addEventListener("change", importRules);
 
   // Tab 切换
   document.querySelectorAll(".tab").forEach(btn => {
@@ -131,6 +159,17 @@ const $ = id => document.getElementById(id);
   renderList("scripts", "scriptList");
 })();
 
+function applyTheme(theme) {
+  document.body.dataset.theme = theme;
+}
+
+function applyView(view) {
+  document.body.dataset.view = view;
+  const icon = $("viewIcon");
+  if (icon) icon.innerHTML = view === "card" ? ICON_LIST : ICON_CARD;
+  $("viewBtn").title = view === "card" ? "切换为列表展示" : "切换为卡片展示";
+}
+
 function updateCorsStatus(on) {
   const dot = $("corsStatus").querySelector(".dot");
   dot.className = "dot " + (on ? "on" : "off");
@@ -147,7 +186,6 @@ async function renderList(type, containerId) {
     (item.urlPattern || "").toLowerCase().includes(filter)
   );
 
-  // 更新顶部生效计数
   const all = await Promise.all([store.get("styles"), store.get("scripts")]);
   const activeCount = [...all[0], ...all[1]].filter(i => i.enabled !== false).length;
   $("activeCount").textContent = activeCount + " 条生效";
@@ -204,10 +242,8 @@ async function toggleItem(type, id, enabled) {
   if (!currentTabId) return;
 
   if (type === "styles") {
-    // 样式：删旧插新，即时生效
     chrome.tabs.sendMessage(currentTabId, { type: "REFRESH" }, () => void chrome.runtime.lastError);
   } else {
-    // 脚本：禁用无法撤销已执行代码，刷新页面让副作用随页面重建消失
     if (!enabled) {
       chrome.tabs.reload(currentTabId, () => void chrome.runtime.lastError);
     } else {
@@ -307,4 +343,69 @@ function updateLineNumbers() {
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ===== 导入导出：仅用户创建的 CSS / JS 规则 =====
+
+async function exportRules() {
+  const data = await p(chrome.storage.local, "get", ["styles", "scripts"]);
+  const payload = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    styles: data.styles || [],
+    scripts: data.scripts || []
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `universal-toolkit-rules-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function importRules(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  e.target.value = ""; // 允许重复选择同一文件
+
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch {
+    alert("导入失败：不是有效的 JSON 文件");
+    return;
+  }
+  if (!payload || typeof payload !== "object" ||
+      (!Array.isArray(payload.styles) && !Array.isArray(payload.scripts))) {
+    alert("导入失败：文件里没有 styles 或 scripts 数组");
+    return;
+  }
+
+  const mode = confirm("点击“确定”合并到现有规则（按 id 去重，同 id 以导入文件为准）；点击“取消”覆盖现有规则。")
+    ? "merge" : "replace";
+
+  const current = await p(chrome.storage.local, "get", ["styles", "scripts"]);
+  const mergeById = (existing, incoming) => {
+    const map = new Map(existing.map(i => [i.id, i]));
+    for (const item of incoming) {
+      if (item && item.id) map.set(item.id, item);
+    }
+    return [...map.values()];
+  };
+
+  const nextStyles = mode === "merge"
+    ? mergeById(current.styles || [], payload.styles || [])
+    : (payload.styles || []);
+  const nextScripts = mode === "merge"
+    ? mergeById(current.scripts || [], payload.scripts || [])
+    : (payload.scripts || []);
+
+  await p(chrome.storage.local, "set", { styles: nextStyles, scripts: nextScripts });
+  renderList("styles", "styleList");
+  renderList("scripts", "scriptList");
+  refreshPage();
+  alert(`导入完成：${nextStyles.length} 条样式，${nextScripts.length} 条脚本`);
 }
