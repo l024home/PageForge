@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="top-bar">
+    <div class="brand">
+      <div class="logo">UT</div>
+      <div>
+        <h1>Universal Toolkit</h1>
+        <p class="site" id="siteLabel">当前站点：—</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="badge" id="activeCount">0 条生效</span>
+      <button id="refreshBtn" class="icon-btn" title="刷新当前页面注入">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="style">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 3c-4.97 0-9 3.58-9 8 0 3.07 2.13 5.64 5.32 7.02L9 21l3-1.5L15 21l.68-2.98C18.87 16.64 21 14.07 21 11c0-4.42-4.03-8-9-8z"/></svg>
+      样式管理
+    </button>
+    <button class="tab" data-tab="script">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M9.4 16.6 4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0 4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+      脚本管理
+    </button>
+    <button class="tab" data-tab="cors">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm1-13h-2v6l5.25 3.15.75-1.23-4-2.37V7z"/></svg>
+      跨域设置
+    </button>
+  </nav>
+
+  <main>
+    <!-- 样式模块 -->
+    <section id="tab-style" class="tab-panel active">
+      <div class="toolbar">
+        <button id="addStyleBtn" class="primary">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          新建样式
+        </button>
+        <input type="search" id="styleSearch" class="search" placeholder="搜索名称或匹配模式…">
+      </div>
+      <div id="styleList" class="item-list"></div>
+    </section>
+
+    <!-- 脚本模块 -->
+    <section id="tab-script" class="tab-panel">
+      <div class="toolbar">
+        <button id="addScriptBtn" class="primary">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          新建脚本
+        </button>
+        <input type="search" id="scriptSearch" class="search" placeholder="搜索名称或匹配模式…">
+      </div>
+      <div id="scriptList" class="item-list"></div>
+    </section>
+
+    <!-- 跨域模块 -->
+    <section id="tab-cors" class="tab-panel">
+      <div class="cors-card">
+        <div class="cors-header">
+          <div>
+            <h2>本地调试跨域</h2>
+            <p class="hint">仅对 localhost / 127.0.0.1 发起的 XHR/Fetch 生效，回写具体 Origin 并允许凭证。</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="corsToggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <label class="field">
+          <span>目标 Origin</span>
+          <div class="input-row">
+            <input type="text" id="corsOrigin" value="http://localhost:3000" placeholder="http://localhost:3000">
+            <button id="copyOrigin" class="ghost" title="复制">复制</button>
+          </div>
+        </label>
+        <div class="status-row" id="corsStatus">
+          <span class="dot off"></span>
+          <span id="corsStatusText">未启用</span>
+        </div>
+        <p class="warning">⚠️ 仅用于开发调试，长期开启会破坏同源安全策略。</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- 编辑器弹层 -->
+  <dialog id="editorDialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <h2 id="editorTitle">编辑</h2>
+        <div class="dialog-header-actions">
+          <span class="dirty-indicator" id="dirtyIndicator" hidden>● 未保存</span>
+          <button type="button" id="closeEditor" class="icon-btn" title="关闭">✕</button>
+        </div>
+      </div>
+      <div class="field-row">
+        <label class="field">
+          <span>名称</span>
+          <input type="text" id="editName" placeholder="我的自定义样式">
+        </label>
+        <label class="field">
+          <span>URL 匹配模式 <small>（留空 = 全部适用）</small></span>
+          <input type="text" id="editPattern" placeholder="https://example.com/*">
+        </label>
+      </div>
+      <label class="field">
+        <span>代码 <small>（Tab 缩进，Ctrl/Cmd+S 保存）</small></span>
+        <div class="code-wrap">
+          <pre class="line-numbers" id="lineNumbers">1</pre>
+          <textarea id="editCode" spellcheck="false" placeholder="/* CSS 或 JavaScript */"></textarea>
+        </div>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="deleteItem" class="danger">删除</button>
+        <div class="dialog-actions-right">
+          <button type="button" id="cancelItem" class="ghost">取消</button>
+          <button type="button" id="saveItem" class="primary">保存</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="panel.js"></script>
+</body>
+</html>
