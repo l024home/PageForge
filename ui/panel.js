@@ -29,9 +29,11 @@ let editingId = null;
 let filters = { styles: "", scripts: "" };
 let currentTheme = "dark";
 let currentView = "card";
+let pendingImportPayload = null;
 
 const $ = id => document.getElementById(id);
 
+// 图标表示“当前状态”
 const ICON_CARD = '<path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/>';
 const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 6h18v4H3v-4z"/>';
 
@@ -41,7 +43,6 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
   currentUrl = tab?.url || "";
   $("siteLabel").textContent = "当前站点：" + (currentUrl ? new URL(currentUrl).hostname : "—");
 
-  // 恢复主题与展示模式
   const prefs = await p(chrome.storage.local, "get", ["theme", "view"]);
   currentTheme = prefs.theme || "dark";
   currentView = prefs.view || "card";
@@ -59,12 +60,18 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
     await p(chrome.storage.local, "set", { view: currentView });
   });
 
-  // 导入导出
-  $("exportBtn").addEventListener("click", exportRules);
-  $("importBtn").addEventListener("click", () => $("importFile").click());
-  $("importFile").addEventListener("change", importRules);
+  $("exportBtn").addEventListener("click", () => $("exportDialog").showModal());
+  $("closeExport").addEventListener("click", () => $("exportDialog").close());
+  $("exportCancel").addEventListener("click", () => $("exportDialog").close());
+  $("exportConfirm").addEventListener("click", exportRules);
 
-  // Tab 切换
+  $("importBtn").addEventListener("click", () => $("importFile").click());
+  $("importFile").addEventListener("change", onImportFileChosen);
+  $("closeImport").addEventListener("click", closeImportDialog);
+  $("importCancel").addEventListener("click", closeImportDialog);
+  $("importMerge").addEventListener("click", () => executeImport("merge"));
+  $("importReplace").addEventListener("click", () => executeImport("replace"));
+
   document.querySelectorAll(".tab").forEach(btn => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
@@ -80,7 +87,6 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
     }
   });
 
-  // 搜索
   $("styleSearch").addEventListener("input", e => {
     filters.styles = e.target.value.toLowerCase();
     renderList("styles", "styleList");
@@ -90,7 +96,6 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
     renderList("scripts", "scriptList");
   });
 
-  // 跨域
   const corsToggle = $("corsToggle");
   const corsOrigin = $("corsOrigin");
   const data = await p(chrome.storage.local, "get", ["corsEnabled", "corsTarget"]);
@@ -123,7 +128,6 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
     } catch {}
   });
 
-  // 新建
   $("addStyleBtn").addEventListener("click", () => openEditor("styles"));
   $("addScriptBtn").addEventListener("click", () => openEditor("scripts"));
   $("closeEditor").addEventListener("click", closeDialog);
@@ -131,11 +135,16 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
   $("saveItem").addEventListener("click", saveItem);
   $("deleteItem").addEventListener("click", deleteItem);
 
-  // 编辑器快捷键与行号
   const codeEl = $("editCode");
-  codeEl.addEventListener("input", updateLineNumbers);
+  const highlightEl = $("codeHighlight");
+  codeEl.addEventListener("input", () => {
+    updateLineNumbers();
+    updateHighlight();
+  });
   codeEl.addEventListener("scroll", () => {
     $("lineNumbers").scrollTop = codeEl.scrollTop;
+    highlightEl.scrollTop = codeEl.scrollTop;
+    highlightEl.scrollLeft = codeEl.scrollLeft;
   });
   codeEl.addEventListener("keydown", e => {
     if (e.key === "Tab") {
@@ -145,6 +154,7 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
       codeEl.value = codeEl.value.slice(0, start) + "  " + codeEl.value.slice(end);
       codeEl.selectionStart = codeEl.selectionEnd = start + 2;
       updateLineNumbers();
+      updateHighlight();
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
@@ -155,8 +165,7 @@ const ICON_LIST = '<path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 
     $(id).addEventListener("input", () => { $("dirtyIndicator").hidden = false; });
   });
 
-  renderList("styles", "styleList");
-  renderList("scripts", "scriptList");
+  refreshAllLists();
 })();
 
 function applyTheme(theme) {
@@ -166,7 +175,7 @@ function applyTheme(theme) {
 function applyView(view) {
   document.body.dataset.view = view;
   const icon = $("viewIcon");
-  if (icon) icon.innerHTML = view === "card" ? ICON_LIST : ICON_CARD;
+  if (icon) icon.innerHTML = view === "card" ? ICON_CARD : ICON_LIST;
   $("viewBtn").title = view === "card" ? "切换为列表展示" : "切换为卡片展示";
 }
 
@@ -176,19 +185,29 @@ function updateCorsStatus(on) {
   $("corsStatusText").textContent = on ? "已启用（仅 localhost/127.0.0.1）" : "未启用";
 }
 
-async function renderList(type, containerId) {
-  const items = await store.get(type);
+async function refreshAllLists() {
+  const [styles, scripts] = await Promise.all([store.get("styles"), store.get("scripts")]);
+  const activeCount = [...styles, ...scripts].filter(i => i.enabled !== false).length;
+  $("activeCount").textContent = activeCount + " 条生效";
+  renderListFromData("styles", "styleList", styles);
+  renderListFromData("scripts", "scriptList", scripts);
+}
+
+function renderList(type, containerId) {
+  store.get(type).then(items => {
+    renderListFromData(type, containerId, items);
+  });
+}
+
+function renderListFromData(type, containerId, items) {
   const container = $(containerId);
+  if (!container) return;
   const filter = filters[type] || "";
   const filtered = items.filter(item =>
     !filter ||
     (item.name || "").toLowerCase().includes(filter) ||
     (item.urlPattern || "").toLowerCase().includes(filter)
   );
-
-  const all = await Promise.all([store.get("styles"), store.get("scripts")]);
-  const activeCount = [...all[0], ...all[1]].filter(i => i.enabled !== false).length;
-  $("activeCount").textContent = activeCount + " 条生效";
 
   if (!filtered.length) {
     container.innerHTML = `<div class="empty"><strong>${items.length ? "没有匹配的条目" : "还没有条目"}</strong>${items.length ? "换个关键词试试" : "点击上方按钮创建第一条规则"}</div>`;
@@ -237,18 +256,14 @@ async function toggleItem(type, id, enabled) {
   if (idx < 0) return;
   items[idx].enabled = enabled;
   await store.set(type, items);
-  renderList(type, type === "styles" ? "styleList" : "scriptList");
+  await refreshAllLists();
 
   if (!currentTabId) return;
 
   if (type === "styles") {
     chrome.tabs.sendMessage(currentTabId, { type: "REFRESH" }, () => void chrome.runtime.lastError);
   } else {
-    if (!enabled) {
-      chrome.tabs.reload(currentTabId, () => void chrome.runtime.lastError);
-    } else {
-      chrome.tabs.sendMessage(currentTabId, { type: "REFRESH" }, () => void chrome.runtime.lastError);
-    }
+    chrome.tabs.reload(currentTabId, () => void chrome.runtime.lastError);
   }
 }
 
@@ -257,7 +272,7 @@ async function quickDelete(type, id) {
   let items = await store.get(type);
   items = items.filter(i => i.id !== id);
   await store.set(type, items);
-  renderList(type, type === "styles" ? "styleList" : "scriptList");
+  await refreshAllLists();
   refreshPage();
 }
 
@@ -273,6 +288,8 @@ function openEditor(type, id = null) {
     $("editName").value = "";
     $("editPattern").value = "";
     $("editCode").value = "";
+    updateLineNumbers();
+    updateHighlight();
   } else {
     store.get(type).then(items => {
       const item = items.find(i => i.id === id);
@@ -281,9 +298,9 @@ function openEditor(type, id = null) {
       $("editPattern").value = item.urlPattern || "";
       $("editCode").value = item.css || item.code || "";
       updateLineNumbers();
+      updateHighlight();
     });
   }
-  if (isNew) updateLineNumbers();
   $("editorDialog").showModal();
   setTimeout(() => $("editName").focus(), 50);
 }
@@ -293,6 +310,17 @@ async function saveItem() {
   const urlPattern = $("editPattern").value.trim();
   const code = $("editCode").value;
   const codeKey = editingType === "styles" ? "css" : "code";
+
+  if (urlPattern) {
+    if (/\s/.test(urlPattern)) {
+      alert("URL 匹配模式不能包含空格");
+      return;
+    }
+    if (urlPattern.includes("://") && !/^[a-z][a-z0-9+.-]*:\/\//i.test(urlPattern)) {
+      alert("URL 匹配模式格式不正确，请以 http:// 或 https:// 开头");
+      return;
+    }
+  }
 
   let items = await store.get(editingType);
   if (editingId) {
@@ -309,7 +337,7 @@ async function saveItem() {
   }
   await store.set(editingType, items);
   closeDialog();
-  renderList(editingType, editingType === "styles" ? "styleList" : "scriptList");
+  await refreshAllLists();
   refreshPage();
 }
 
@@ -320,7 +348,7 @@ async function deleteItem() {
   items = items.filter(i => i.id !== editingId);
   await store.set(editingType, items);
   closeDialog();
-  renderList(editingType, editingType === "styles" ? "styleList" : "scriptList");
+  await refreshAllLists();
   refreshPage();
 }
 
@@ -341,13 +369,38 @@ function updateLineNumbers() {
   $("lineNumbers").textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
 }
 
+function updateHighlight() {
+  const code = $("editCode").value;
+  const type = editingType === "styles" ? "css" : "js";
+  $("codeHighlight").innerHTML = highlightCode(code, type) + "\n";
+}
+
+function highlightCode(code, type) {
+  const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  if (type === "css") {
+    return esc(code)
+      .replace(/\/\*[\s\S]*?\*\//g, m => `<span class="tok-comment">${m}</span>`)
+      .replace(/([^{}]+)(?=\{)/g, m => `<span class="tok-selector">${m}</span>`)
+      .replace(/([-\w]+)(\s*:\s*)([^;{}]+)(;?)/g, (_, prop, colon, val, semi) =>
+        `<span class="tok-prop">${prop}</span>${colon}<span class="tok-value">${val}</span>${semi}`)
+      .replace(/([{};])/g, '<span class="tok-punct">$1</span>');
+  }
+  return esc(code)
+    .replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, m => `<span class="tok-comment">${m}</span>`)
+    .replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, m => `<span class="tok-string">${m}</span>`)
+    .replace(/\b(const|let|var|function|return|if|else|for|while|new|try|catch|throw|async|await|class|extends|import|from|export|default|switch|case|break|continue|typeof|instanceof|in|of|this|true|false|null|undefined)\b/g,
+      m => `<span class="tok-keyword">${m}</span>`)
+    .replace(/\b(\d+(?:\.\d+)?)\b/g, m => `<span class="tok-number">${m}</span>`)
+    .replace(/([{}()[\];,.=+\-*/<>!&|:?])/g, '<span class="tok-punct">$1</span>');
+}
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-// ===== 导入导出：仅用户创建的 CSS / JS 规则 =====
-
+// ---- 导出：先弹说明，再下载 ----
 async function exportRules() {
+  $("exportDialog").close();
   const data = await p(chrome.storage.local, "get", ["styles", "scripts"]);
   const payload = {
     version: 1,
@@ -359,17 +412,18 @@ async function exportRules() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `universal-toolkit-rules-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `pageforge-rules-${new Date().toISOString().slice(0, 10)}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
 }
 
-async function importRules(e) {
+// ---- 导入：先解析，再弹层选择模式 ----
+async function onImportFileChosen(e) {
   const file = e.target.files?.[0];
   if (!file) return;
-  e.target.value = ""; // 允许重复选择同一文件
+  e.target.value = "";
 
   let payload;
   try {
@@ -384,10 +438,45 @@ async function importRules(e) {
     return;
   }
 
-  const mode = confirm("点击“确定”合并到现有规则（按 id 去重，同 id 以导入文件为准）；点击“取消”覆盖现有规则。")
-    ? "merge" : "replace";
-
+  const incomingStyles = payload.styles || [];
+  const incomingScripts = payload.scripts || [];
   const current = await p(chrome.storage.local, "get", ["styles", "scripts"]);
+  const currentStyles = current.styles || [];
+  const currentScripts = current.scripts || [];
+
+  const conflictIds = new Set([
+    ...currentStyles.map(i => i.id),
+    ...currentScripts.map(i => i.id)
+  ]);
+  const conflicts = [
+    ...incomingStyles.filter(i => i && conflictIds.has(i.id)),
+    ...incomingScripts.filter(i => i && conflictIds.has(i.id))
+  ].length;
+
+  pendingImportPayload = { incomingStyles, incomingScripts, currentStyles, currentScripts, conflicts };
+
+  $("importSummary").textContent =
+    `文件包含 ${incomingStyles.length} 条样式、${incomingScripts.length} 条脚本。请选择导入方式：`;
+  const hint = $("importConflictHint");
+  if (conflicts > 0) {
+    hint.hidden = false;
+    hint.textContent = `注意：与现有规则存在 ${conflicts} 条同 id 冲突，合并时将以导入文件为准覆盖。`;
+  } else {
+    hint.hidden = true;
+    hint.textContent = "";
+  }
+  $("importDialog").showModal();
+}
+
+function closeImportDialog() {
+  $("importDialog").close();
+  pendingImportPayload = null;
+}
+
+async function executeImport(mode) {
+  if (!pendingImportPayload) { closeImportDialog(); return; }
+  const { incomingStyles, incomingScripts, currentStyles, currentScripts } = pendingImportPayload;
+
   const mergeById = (existing, incoming) => {
     const map = new Map(existing.map(i => [i.id, i]));
     for (const item of incoming) {
@@ -396,16 +485,11 @@ async function importRules(e) {
     return [...map.values()];
   };
 
-  const nextStyles = mode === "merge"
-    ? mergeById(current.styles || [], payload.styles || [])
-    : (payload.styles || []);
-  const nextScripts = mode === "merge"
-    ? mergeById(current.scripts || [], payload.scripts || [])
-    : (payload.scripts || []);
+  const nextStyles = mode === "merge" ? mergeById(currentStyles, incomingStyles) : incomingStyles;
+  const nextScripts = mode === "merge" ? mergeById(currentScripts, incomingScripts) : incomingScripts;
 
   await p(chrome.storage.local, "set", { styles: nextStyles, scripts: nextScripts });
-  renderList("styles", "styleList");
-  renderList("scripts", "scriptList");
+  closeImportDialog();
+  await refreshAllLists();
   refreshPage();
-  alert(`导入完成：${nextStyles.length} 条样式，${nextScripts.length} 条脚本`);
 }

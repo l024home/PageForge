@@ -1,7 +1,6 @@
-
 {
   "manifest_version": 3,
-  "name": "Universal Toolkit",
+  "name": "PageForge",
   "version": "1.0.0",
   "description": "样式管理、脚本注入与跨域调试一体化工具",
   "permissions": [
@@ -15,7 +14,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "打开 Universal Toolkit",
+    "default_title": "打开 PageForge",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -32,9 +31,15 @@
       "run_at": "document_start"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject-main.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "universal-toolkit@dev.local",
+      "id": "page-forge@dev.local",
       "strict_min_version": "109.0"
     }
   },

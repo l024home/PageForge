@@ -14,10 +14,64 @@ function p(obj, method, ...args) {
 
 function matchPattern(url, pattern) {
   if (!pattern || pattern.trim() === "") return true;
-  const escaped = pattern
+  const p = pattern.trim();
+  if (p === "*") return true;
+
+  let testUrl = url;
+  let regexStr;
+
+  if (p.startsWith("/")) {
+    try {
+      const u = new URL(url);
+      testUrl = u.pathname + u.search;
+    } catch {
+      testUrl = url;
+    }
+    regexStr = p;
+  } else if (p.includes("://")) {
+    regexStr = p;
+  } else {
+    regexStr = `*://${p}`;
+    const afterScheme = regexStr.indexOf("://") + 3;
+    if (!regexStr.slice(afterScheme).includes("/")) {
+      regexStr += "/*";
+    }
+  }
+
+  const escaped = regexStr
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(url);
+  try {
+    return new RegExp(`^${escaped}$`).test(testUrl);
+  } catch {
+    return false;
+  }
+}
+
+const injectedScriptIds = new Set();
+const STYLE_CACHE_KEY = "utk_style_cache";
+
+function applyCachedStylesSync() {
+  let cached = "";
+  try {
+    cached = sessionStorage.getItem(STYLE_CACHE_KEY) || "";
+  } catch {
+    cached = "";
+  }
+  if (!cached) return;
+  const old = document.getElementById("utk-style");
+  if (old) old.remove();
+  const style = document.createElement("style");
+  style.id = "utk-style";
+  style.textContent = cached;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function writeStyleCache(css) {
+  try {
+    if (css) sessionStorage.setItem(STYLE_CACHE_KEY, css);
+    else sessionStorage.removeItem(STYLE_CACHE_KEY);
+  } catch {}
 }
 
 async function applyStyles() {
@@ -27,43 +81,73 @@ async function applyStyles() {
     s.enabled !== false && (!s.urlPattern || matchPattern(location.href, s.urlPattern))
   );
 
-  // 先移除旧样式，确保禁用后立即消失
   const old = document.getElementById("utk-style");
   if (old) old.remove();
-  if (!matched.length) return;
+
+  if (!matched.length) {
+    writeStyleCache("");
+    return;
+  }
 
   const css = matched.map(s => s.css).join("\n");
   const style = document.createElement("style");
   style.id = "utk-style";
   style.textContent = css;
   (document.head || document.documentElement).appendChild(style);
+  writeStyleCache(css);
 }
 
-async function applyScripts() {
+async function requestScriptInjection() {
   const data = await p(chrome.storage.local, "get", "scripts");
   const scripts = data.scripts || [];
   const matched = scripts.filter(s =>
     s.enabled !== false && (!s.urlPattern || matchPattern(location.href, s.urlPattern))
   );
+
   for (const s of matched) {
+    if (injectedScriptIds.has(s.id)) continue;
+    injectedScriptIds.add(s.id);
+
     try {
-      new Function(s.code)();
+      await p(chrome.runtime, "sendMessage", {
+        type: "INJECT_SCRIPT",
+        code: s.code,
+        id: s.id,
+        name: s.name || ""
+      });
     } catch (e) {
-      console.warn("[Toolkit] 脚本执行失败:", s.name, e);
+      console.warn("[PageForge] 脚本注入请求失败:", s.name, e);
+      try {
+        new Function(s.code)();
+      } catch (err) {
+        console.warn("[PageForge] 隔离世界执行失败（可能被 CSP 拦截）:", s.name, err);
+        chrome.runtime.sendMessage({
+          type: "SCRIPT_ERROR",
+          id: s.id,
+          name: s.name || "",
+          error: String(err)
+        }, () => void chrome.runtime.lastError);
+      }
     }
   }
 }
 
+applyCachedStylesSync();
 applyStyles();
+
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", applyScripts);
+  document.addEventListener("DOMContentLoaded", requestScriptInjection);
 } else {
-  applyScripts();
+  requestScriptInjection();
 }
 
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "REFRESH") {
     applyStyles();
-    applyScripts();
+    requestScriptInjection();
+    sendResponse({ ok: true });
+    return true;
   }
+  sendResponse({ ok: false, error: "unknown message" });
+  return false;
 });

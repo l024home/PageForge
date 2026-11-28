@@ -13,6 +13,7 @@ function p(obj, method, ...args) {
 }
 
 const CORS_RULE_ID = 1;
+const scriptStatusByTab = new Map(); // tabId -> { [scriptId]: { ok, error } }
 
 async function setCorsRule(enabled, origin = null) {
   if (!enabled) {
@@ -43,19 +44,47 @@ async function setCorsRule(enabled, origin = null) {
   });
 }
 
-async function injectScript(tabId, code) {
-  await p(chrome.scripting, "executeScript", {
-    target: { tabId },
-    func: (scriptCode) => {
-      try { new Function(scriptCode)(); } catch (e) { console.error("[Toolkit]", e); }
-    },
-    args: [code],
-    world: "ISOLATED"
-  });
+async function injectScriptInMain(tabId, code, id, name) {
+  try {
+    await p(chrome.scripting, "executeScript", {
+      target: { tabId },
+      world: "MAIN",
+      func: (scriptCode) => {
+        new Function(scriptCode)();
+      },
+      args: [code]
+    });
+    scriptStatusByTab.set(tabId, {
+      ...(scriptStatusByTab.get(tabId) || {}),
+      [id]: { ok: true, name }
+    });
+    return { ok: true };
+  } catch (e) {
+    scriptStatusByTab.set(tabId, {
+      ...(scriptStatusByTab.get(tabId) || {}),
+      [id]: { ok: false, name, error: String(e) }
+    });
+    return { ok: false, error: String(e) };
+  }
 }
 
-// ---- 侧边栏 / 面板打开方式初始化 ----
+async function getTabIdFromSender(sender) {
+  return sender.tab?.id ?? null;
+}
+
+// ---- 面板打开方式：幂等，只注册一次兜底 ----
 let panelBehaviorReady = false;
+let fallbackRegistered = false;
+
+function registerTabFallback() {
+  if (fallbackRegistered) return;
+  fallbackRegistered = true;
+  if (chrome.action?.onClicked) {
+    chrome.action.onClicked.addListener(() => {
+      chrome.tabs.create({ url: chrome.runtime.getURL("ui/panel.html") });
+    });
+  }
+}
 
 async function initPanelBehavior() {
   if (panelBehaviorReady) return;
@@ -67,30 +96,28 @@ async function initPanelBehavior() {
   if (hasSidePanel) {
     try {
       await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-      return; // 支持侧边栏，点击图标自动打开侧边栏，不注册 onClicked
+      return; // 支持侧边栏，不注册 onClicked
     } catch (e) {
-      console.warn("[Toolkit] setPanelBehavior 失败，退化为标签页打开:", e);
+      console.warn("[PageForge] setPanelBehavior 失败，退化为标签页打开:", e);
     }
   } else {
-    console.warn("[Toolkit] 当前环境不支持 sidePanel API，退化为标签页打开");
+    console.warn("[PageForge] 当前环境不支持 sidePanel API，退化为标签页打开");
   }
 
-  // 兜底：点击扩展图标时打开独立标签页
-  if (chrome.action?.onClicked) {
-    chrome.action.onClicked.addListener(() => {
-      chrome.tabs.create({ url: chrome.runtime.getURL("ui/panel.html") });
-    });
-  }
+  registerTabFallback();
 }
 
 initPanelBehavior();
 
-// ---- 安装与消息处理 ----
 chrome.runtime.onInstalled.addListener(async () => {
   const data = await p(chrome.storage.local, "get", ["corsEnabled", "corsTarget"]);
   if (data.corsEnabled) {
     await setCorsRule(true, data.corsTarget || "http://localhost:3000");
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  scriptStatusByTab.delete(tabId);
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -101,13 +128,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await setCorsRule(msg.enabled, msg.origin);
           sendResponse({ ok: true });
           break;
-        case "INJECT_SCRIPT":
-          await injectScript(msg.tabId, msg.code);
+
+        case "INJECT_SCRIPT": {
+          const tabId = await getTabIdFromSender(sender);
+          if (!tabId) { sendResponse({ ok: false, error: "no tab" }); break; }
+          const result = await injectScriptInMain(tabId, msg.code, msg.id, msg.name);
+          sendResponse(result);
+          break;
+        }
+
+        case "SCRIPT_ERROR": {
+          const tabId = await getTabIdFromSender(sender);
+          if (tabId) {
+            scriptStatusByTab.set(tabId, {
+              ...(scriptStatusByTab.get(tabId) || {}),
+              [msg.id]: { ok: false, name: msg.name, error: msg.error }
+            });
+          }
           sendResponse({ ok: true });
           break;
+        }
+
+        case "GET_SCRIPT_STATUS": {
+          const tabId = msg.tabId;
+          sendResponse({ ok: true, status: scriptStatusByTab.get(tabId) || {} });
+          break;
+        }
+
         case "GET_TAB_INFO":
           sendResponse({ url: sender.tab?.url || "" });
           break;
+
         default:
           sendResponse({ ok: false, error: "unknown message" });
       }

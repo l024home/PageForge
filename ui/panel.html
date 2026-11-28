@@ -7,15 +7,15 @@
 <body data-theme="dark" data-view="card">
   <header class="top-bar">
     <div class="brand">
-      <div class="logo">UT</div>
+      <div class="logo">PF</div>
       <div>
-        <h1>Universal Toolkit</h1>
+        <h1>PageForge</h1>
         <p class="site" id="siteLabel">当前站点：—</p>
       </div>
     </div>
     <div class="top-actions">
       <span class="badge" id="activeCount">0 条生效</span>
-      <button id="exportBtn" class="icon-btn" title="导出规则">
+      <button id="exportBtn" class="icon-btn" title="导出 CSS / JS 规则（不含主题与跨域）">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
           <path d="M14 3v6h6"/>
@@ -23,7 +23,7 @@
           <path d="M9 15l3 3 3-3"/>
         </svg>
       </button>
-      <button id="importBtn" class="icon-btn" title="导入规则">
+      <button id="importBtn" class="icon-btn" title="导入 CSS / JS 规则">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
           <path d="M14 3v6h6"/>
@@ -34,8 +34,8 @@
       <button id="themeBtn" class="icon-btn" title="切换主题">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>
       </button>
-      <button id="viewBtn" class="icon-btn" title="切换展示方式">
-        <svg id="viewIcon" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 5h18v4H3V5zm0 6h18v4H3v-4zm0 6h18v4H3v-4z"/></svg>
+      <button id="viewBtn" class="icon-btn" title="切换为列表展示">
+        <svg id="viewIcon" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/></svg>
       </button>
       <button id="refreshBtn" class="icon-btn" title="刷新当前页面注入">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
@@ -127,14 +127,18 @@
         </label>
         <label class="field">
           <span>URL 匹配模式 <small>（留空 = 全部适用）</small></span>
-          <input type="text" id="editPattern" placeholder="https://example.com/*">
+          <input type="text" id="editPattern" placeholder="example.com/* 或 *.example.com 或 /api/* 或留空">
+          <small class="field-hint">支持：留空/`*` 全部；`example.com` 自动匹配任意协议路径；`https://a.com/*` 完整通配；`/api/*` 路径匹配。</small>
         </label>
       </div>
       <label class="field">
         <span>代码 <small>（Tab 缩进，Ctrl/Cmd+S 保存）</small></span>
         <div class="code-wrap">
           <pre class="line-numbers" id="lineNumbers">1</pre>
-          <textarea id="editCode" spellcheck="false" placeholder="/* CSS 或 JavaScript */"></textarea>
+          <div class="code-editor">
+            <pre class="code-highlight" id="codeHighlight" aria-hidden="true"></pre>
+            <textarea id="editCode" spellcheck="false" placeholder="/* CSS 或 JavaScript */"></textarea>
+          </div>
         </div>
       </label>
       <div class="dialog-actions">
@@ -142,6 +146,43 @@
         <div class="dialog-actions-right">
           <button type="button" id="cancelItem" class="ghost">取消</button>
           <button type="button" id="saveItem" class="primary">保存</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 导入模式弹层 -->
+  <dialog id="importDialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <h2>导入规则</h2>
+        <button type="button" id="closeImport" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <p class="hint" id="importSummary">选择导入方式：</p>
+      <p class="warning" id="importConflictHint" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="importCancel" class="ghost">取消</button>
+        <div class="dialog-actions-right">
+          <button type="button" id="importMerge" class="ghost">合并到现有规则</button>
+          <button type="button" id="importReplace" class="primary">覆盖现有规则</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 导出说明弹层 -->
+  <dialog id="exportDialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <h2>导出规则</h2>
+        <button type="button" id="closeExport" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <p class="hint">将导出你创建的所有 CSS 样式与 JS 脚本规则（含启用状态、URL 匹配模式）。</p>
+      <p class="hint">不包含主题、展示方式和跨域设置。</p>
+      <div class="dialog-actions">
+        <button type="button" id="exportCancel" class="ghost">取消</button>
+        <div class="dialog-actions-right">
+          <button type="button" id="exportConfirm" class="primary">导出 JSON</button>
         </div>
       </div>
     </form>
